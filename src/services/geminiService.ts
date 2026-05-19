@@ -52,15 +52,18 @@ ${currentCityInfo}`;
     });
 
     // Map our messages format to Gemini format
-    // Filter out temporary system instructions or format issues
     const formattedHistory = messages.map(msg => ({
       role: msg.sender === 'user' ? 'user' : 'model',
       parts: [{ text: msg.text }],
     }));
 
+    // Gemini API requires the first message in the chat history to be from the 'user'
+    const firstUserIndex = formattedHistory.findIndex(msg => msg.role === 'user');
+    const validHistory = firstUserIndex !== -1 ? formattedHistory.slice(firstUserIndex) : [];
+
     // Split history into past history and the latest message
-    const chatHistory = formattedHistory.slice(0, -1);
-    const latestMessage = formattedHistory[formattedHistory.length - 1]?.parts[0]?.text || '';
+    const chatHistory = validHistory.slice(0, -1);
+    const latestMessage = validHistory[validHistory.length - 1]?.parts[0]?.text || '';
 
     const chat = model.startChat({
       history: chatHistory,
