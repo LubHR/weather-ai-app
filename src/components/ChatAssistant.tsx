@@ -14,22 +14,24 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { startChatSession, resumeChatSession } from '../services/weatherService';
+import { searchCity, getWeatherData } from '../services/weatherService';
 import { ChatMessage } from '../types/weather';
+import { getGeminiChatResponse, WeatherContext } from '../services/geminiService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function ChatAssistant() {
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome',
-      text: 'Привіт! Я твій розумний погодний асистент.\n\nЗапитай мене будь-що про погоду в конкретному місті або порадься щодо планів чи одягу. Наприклад: "Яка погода у Києві і чи потрібна парасолька?"',
+      text: 'Привіт! Я твій розумний погодний асистент. 🤖\n\nЗапитай мене будь-що про погоду в конкретному місті або порадься щодо планів чи одягу. Наприклад: "Яка погода у Києві і чи потрібна парасолька?"',
       sender: 'ai',
       timestamp: new Date(),
     },
   ]);
   const [inputText, setInputText] = useState('');
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [weatherContext, setWeatherContext] = useState<WeatherContext | undefined>(undefined);
   const flatListRef = useRef<FlatList>(null);
 
   // Scroll to bottom when messages change
@@ -42,6 +44,21 @@ export default function ChatAssistant() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, loading]);
+
+  // Load weather context from storage
+  useEffect(() => {
+    const loadContext = async () => {
+      try {
+        const saved = await AsyncStorage.getItem('current_weather_context');
+        if (saved) {
+          setWeatherContext(JSON.parse(saved));
+        }
+      } catch (e) {
+        console.error('Failed to load weather context in ChatAssistant', e);
+      }
+    };
+    loadContext();
+  }, []);
 
   const handleSend = async () => {
     if (!inputText.trim()) return;
@@ -58,34 +75,111 @@ export default function ChatAssistant() {
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages);
     setLoading(true);
 
     try {
-      let response;
-      if (!sessionId) {
-        // Start new session
-        response = await startChatSession(userMessageText);
-      } else {
-        // Resume session
-        response = await resumeChatSession(sessionId, userMessageText);
+      // 1. Send conversation history to Gemini
+      let responseText = await getGeminiChatResponse(updatedMessages, weatherContext);
+
+      // 2. Check if the response contains a weather fetching action
+      if (responseText.includes('fetch_weather')) {
+        try {
+          const actionObj = JSON.parse(responseText);
+          if (actionObj.action === 'fetch_weather' && actionObj.city) {
+            const targetCity = actionObj.city;
+
+            // Update UI to let user know we are fetching weather details
+            const fetchingStatusMessage: ChatMessage = {
+              id: (Date.now() + 1).toString(),
+              text: `🤖 Шукаю актуальну погоду для міста ${targetCity}...`,
+              sender: 'ai',
+              timestamp: new Date(),
+            };
+            setMessages((prev) => [...prev, fetchingStatusMessage]);
+
+            // Geocode and fetch weather
+            const searchResults = await searchCity(targetCity);
+            if (searchResults.length > 0) {
+              const matchedCity = searchResults[0];
+              const weather = await getWeatherData(matchedCity.lat, matchedCity.lon);
+
+              // Build weather system message
+              const weatherSystemInfo = `[Системна довідка: Погода у місті ${matchedCity.name} (${matchedCity.country}) зараз: ${weather.current.weather[0]?.description || 'ясно'}, температура ${Math.round(weather.current.temp)}°C, вологість ${weather.current.humidity}%, вітер ${weather.current.wind_speed} м/с. Дай відповідь користувачу на основі цих даних.]`;
+
+              const assistantInfoMessage: ChatMessage = {
+                id: (Date.now() + 2).toString(),
+                text: weatherSystemInfo,
+                sender: 'user', // We send it as 'user' role so Gemini interprets it as part of the context
+                timestamp: new Date(),
+              };
+
+              // Re-request Gemini with the weather data added
+              const finalResponseText = await getGeminiChatResponse(
+                [...updatedMessages, assistantInfoMessage],
+                weatherContext
+              );
+
+              // Replace status message with the final response
+              setMessages((prev) => {
+                const cleaned = prev.filter((m) => m.id !== fetchingStatusMessage.id);
+                return [
+                  ...cleaned,
+                  {
+                    id: (Date.now() + 3).toString(),
+                    text: finalResponseText,
+                    sender: 'ai',
+                    timestamp: new Date(),
+                  },
+                ];
+              });
+            } else {
+              // City not found
+              const cityNotFoundPrompt: ChatMessage = {
+                id: (Date.now() + 2).toString(),
+                text: `[Системна довідка: Місто "${targetCity}" не знайдено в базі OpenWeather. Повідом про це користувача.]`,
+                sender: 'user',
+                timestamp: new Date(),
+              };
+
+              const finalResponseText = await getGeminiChatResponse(
+                [...updatedMessages, cityNotFoundPrompt],
+                weatherContext
+              );
+
+              setMessages((prev) => {
+                const cleaned = prev.filter((m) => m.id !== fetchingStatusMessage.id);
+                return [
+                  ...cleaned,
+                  {
+                    id: (Date.now() + 3).toString(),
+                    text: finalResponseText,
+                    sender: 'ai',
+                    timestamp: new Date(),
+                  },
+                ];
+              });
+            }
+            return;
+          }
+        } catch (jsonErr) {
+          // If JSON parsing fails, treat the response text normally
+        }
       }
 
-      // Add AI reply
+      // Add direct AI reply
       const aiMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        text: response.answer,
+        id: (Date.now() + 4).toString(),
+        text: responseText,
         sender: 'ai',
         timestamp: new Date(),
       };
 
       setMessages((prev) => [...prev, aiMessage]);
-      if (response.session_id) {
-        setSessionId(response.session_id);
-      }
     } catch (error: any) {
       const errorMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
+        id: (Date.now() + 5).toString(),
         text: 'Вибач, сталася помилка з\'єднання. Будь ласка, перевір інтернет або спробуй ще раз.',
         sender: 'ai',
         timestamp: new Date(),
@@ -97,11 +191,10 @@ export default function ChatAssistant() {
   };
 
   const handleClearSession = () => {
-    setSessionId(null);
     setMessages([
       {
         id: Date.now().toString(),
-        text: 'Сесію оновлено! Я готовий до нових запитань про погоду.',
+        text: 'Діалог оновлено! Я готовий до нових запитань про погоду. 🤖',
         sender: 'ai',
         timestamp: new Date(),
       },
@@ -147,7 +240,7 @@ export default function ChatAssistant() {
           </View>
           <Text style={styles.title}>ШІ-Помічник</Text>
         </View>
-        {sessionId && (
+        {messages.length > 1 && (
           <TouchableOpacity onPress={handleClearSession} style={styles.clearButton}>
             <Ionicons name="refresh-outline" size={16} color="#c084fc" />
             <Text style={styles.clearButtonText}>Новий діалог</Text>

@@ -210,6 +210,14 @@ export default function WeatherDashboard() {
       const overview = await getWeatherOverview(city.lat, city.lon, city.name, weather);
       setWeatherData(weather);
       setOverviewData(overview);
+      // Save current city and weather context for AI assistant
+      await AsyncStorage.setItem('current_weather_context', JSON.stringify({
+        cityName: city.name,
+        temp: weather.current.temp,
+        description: weather.current.weather[0]?.description || 'ясно',
+        humidity: weather.current.humidity,
+        windSpeed: weather.current.wind_speed,
+      }));
     } catch (err: any) {
       setError(err.message || 'Не вдалося завантажити дані погоди. Будь ласка, перевірте з\'єднання.');
     } finally {
