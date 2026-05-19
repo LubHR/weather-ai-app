@@ -45,7 +45,7 @@ export async function getGeminiChatResponse(
 ${currentCityInfo}`;
 
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-3.1-flash-lite',
       systemInstruction: {
         role: 'system',
         parts: [{ text: systemInstruction }],
@@ -56,18 +56,37 @@ ${currentCityInfo}`;
     });
 
     // Map our messages format to Gemini format
-    const formattedHistory = messages.map(msg => ({
+    const rawHistory = messages.map(msg => ({
       role: msg.sender === 'user' ? 'user' : 'model',
-      parts: [{ text: msg.text }],
+      text: msg.text,
     }));
 
+    // Merge consecutive messages with the same role to satisfy alternating roles constraint
+    const mergedHistory: { role: string; parts: { text: string }[] }[] = [];
+    for (const msg of rawHistory) {
+      if (mergedHistory.length > 0 && mergedHistory[mergedHistory.length - 1].role === msg.role) {
+        mergedHistory[mergedHistory.length - 1].parts[0].text += `\n\n${msg.text}`;
+      } else {
+        mergedHistory.push({
+          role: msg.role,
+          parts: [{ text: msg.text }],
+        });
+      }
+    }
+
     // Gemini API requires the first message in the chat history to be from the 'user'
-    const firstUserIndex = formattedHistory.findIndex(msg => msg.role === 'user');
-    const validHistory = firstUserIndex !== -1 ? formattedHistory.slice(firstUserIndex) : [];
+    const firstUserIndex = mergedHistory.findIndex(msg => msg.role === 'user');
+    const validHistory = firstUserIndex !== -1 ? mergedHistory.slice(firstUserIndex) : [];
+
+    console.log(`📋 Кількість повідомлень в історії: ${messages.length} -> Після злиття ролей: ${mergedHistory.length} -> Валідна історія (після фільтрації першого user): ${validHistory.length}`);
 
     // Split history into past history and the latest message
     const chatHistory = validHistory.slice(0, -1);
     const latestMessage = validHistory[validHistory.length - 1]?.parts[0]?.text || '';
+
+    console.log('📡 Надсилаємо запит до Gemini API...');
+    console.log('- Кількість повідомлень в історії чату (history):', chatHistory.length);
+    console.log('- Останнє повідомлення (sendMessage):', latestMessage ? `"${latestMessage.substring(0, 100)}..."` : 'порожньо');
 
     const chat = model.startChat({
       history: chatHistory,
@@ -75,9 +94,10 @@ ${currentCityInfo}`;
 
     const result = await chat.sendMessage(latestMessage);
     const responseText = result.response.text();
+    console.log('✅ Отримано відповідь від Gemini API успішно!');
     return responseText.trim();
   } catch (error: any) {
-    console.error('Gemini API Error:', error);
+    console.error('❌ Помилка Gemini API:', error);
     return 'Упс! Сталася помилка при з\'єднанні з ШІ-сервісом Google. Будь ласка, спробуйте пізніше або перевірте ваш API-ключ.';
   }
 }

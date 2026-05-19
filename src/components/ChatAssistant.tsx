@@ -67,6 +67,9 @@ export default function ChatAssistant() {
     setInputText('');
     Keyboard.dismiss();
 
+    console.log('\n--- 💬 НОВЕ ПОВІДОМЛЕННЯ ВІД КОРИСТУВАЧА ---');
+    console.log(`Текст: "${userMessageText}"`);
+
     // Add user message
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
@@ -80,15 +83,18 @@ export default function ChatAssistant() {
     setLoading(true);
 
     try {
-      // 1. Send conversation history to Gemini
+      console.log('🤖 Крок 1: Надсилаємо запит до Gemini...');
       let responseText = await getGeminiChatResponse(updatedMessages, weatherContext);
+      console.log(`🤖 Відповідь від Gemini: "${responseText}"`);
 
       // 2. Check if the response contains a weather fetching action
       if (responseText.includes('fetch_weather')) {
+        console.log('🔍 Виявлено запит на отримання погоди для іншого міста!');
         try {
           const actionObj = JSON.parse(responseText);
           if (actionObj.action === 'fetch_weather' && actionObj.city) {
             const targetCity = actionObj.city;
+            console.log(`👉 Місто для пошуку: "${targetCity}"`);
 
             // Update UI to let user know we are fetching weather details
             const fetchingStatusMessage: ChatMessage = {
@@ -99,11 +105,15 @@ export default function ChatAssistant() {
             };
             setMessages((prev) => [...prev, fetchingStatusMessage]);
 
-            // Geocode and fetch weather
+            console.log(`📡 Крок 2: Запускаємо геокодування для міста "${targetCity}"...`);
             const searchResults = await searchCity(targetCity);
             if (searchResults.length > 0) {
               const matchedCity = searchResults[0];
+              console.log(`📍 Знайдено місто: ${matchedCity.name}, ${matchedCity.country} (lat: ${matchedCity.lat}, lon: ${matchedCity.lon})`);
+              
+              console.log('🌤️ Крок 3: Завантажуємо погоду для знайдених координат...');
               const weather = await getWeatherData(matchedCity.lat, matchedCity.lon);
+              console.log(`✅ Погода завантажена: ${weather.current.weather[0]?.description || 'ясно'}, температура ${Math.round(weather.current.temp)}°C`);
 
               // Build weather system message
               const weatherSystemInfo = `[Системна довідка: Погода у місті ${matchedCity.name} (${matchedCity.country}) зараз: ${weather.current.weather[0]?.description || 'ясно'}, температура ${Math.round(weather.current.temp)}°C, вологість ${weather.current.humidity}%, вітер ${weather.current.wind_speed} м/с. Дай відповідь користувачу на основі цих даних.]`;
@@ -115,11 +125,12 @@ export default function ChatAssistant() {
                 timestamp: new Date(),
               };
 
-              // Re-request Gemini with the weather data added
+              console.log('🔄 Крок 4: Надсилаємо отримані дані погоди назад у Gemini для фінального аналізу...');
               const finalResponseText = await getGeminiChatResponse(
                 [...updatedMessages, assistantInfoMessage],
                 weatherContext
               );
+              console.log(`✨ Фінальна відповідь Gemini: "${finalResponseText}"`);
 
               // Replace status message with the final response
               setMessages((prev) => {
@@ -135,7 +146,7 @@ export default function ChatAssistant() {
                 ];
               });
             } else {
-              // City not found
+              console.log(`❌ Місто "${targetCity}" не знайдено в базі даних OpenWeather!`);
               const cityNotFoundPrompt: ChatMessage = {
                 id: (Date.now() + 2).toString(),
                 text: `[Системна довідка: Місто "${targetCity}" не знайдено в базі OpenWeather. Повідом про це користувача.]`,
@@ -143,10 +154,12 @@ export default function ChatAssistant() {
                 timestamp: new Date(),
               };
 
+              console.log('🔄 Надсилаємо повідомлення про відсутність міста у Gemini...');
               const finalResponseText = await getGeminiChatResponse(
                 [...updatedMessages, cityNotFoundPrompt],
                 weatherContext
               );
+              console.log(`✨ Фінальна відповідь Gemini (місто не знайдено): "${finalResponseText}"`);
 
               setMessages((prev) => {
                 const cleaned = prev.filter((m) => m.id !== fetchingStatusMessage.id);
@@ -164,11 +177,12 @@ export default function ChatAssistant() {
             return;
           }
         } catch (jsonErr) {
-          // If JSON parsing fails, treat the response text normally
+          console.error('⚠️ Помилка обробки JSON дії або запиту:', jsonErr);
         }
       }
 
       // Add direct AI reply
+      console.log('✨ Додаємо пряму відповідь від Gemini в інтерфейс.');
       const aiMessage: ChatMessage = {
         id: (Date.now() + 4).toString(),
         text: responseText,
