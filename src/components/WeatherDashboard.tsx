@@ -16,6 +16,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { searchCity, getWeatherData, getWeatherOverview } from '../services/weatherService';
 import { GeocodingResult, OneCallResponse, WeatherOverviewResponse } from '../types/weather';
 import { auth } from '../services/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Helper to map OpenWeather icon code to Ionicons name
 export function getWeatherIconName(iconCode: string): keyof typeof Ionicons.glyphMap {
@@ -131,7 +132,7 @@ function WeatherLoader() {
   );
 }
 
-const QUICK_CITIES: GeocodingResult[] = [
+const DEFAULT_QUICK_CITIES: GeocodingResult[] = [
   { name: 'Київ', lat: 50.4501, lon: 30.5234, country: 'UA', state: 'м. Київ' },
   { name: 'Львів', lat: 49.8397, lon: 24.0297, country: 'UA', state: 'Львівська область' },
   { name: 'Одеса', lat: 46.4825, lon: 30.7233, country: 'UA', state: 'Одеська область' },
@@ -154,6 +155,51 @@ export default function WeatherDashboard() {
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [quickCities, setQuickCities] = useState<GeocodingResult[]>([]);
+
+  // Load quick cities on mount
+  useEffect(() => {
+    const loadQuickCities = async () => {
+      try {
+        const saved = await AsyncStorage.getItem('quick_cities');
+        if (saved) {
+          setQuickCities(JSON.parse(saved));
+        } else {
+          setQuickCities(DEFAULT_QUICK_CITIES);
+        }
+      } catch (e) {
+        setQuickCities(DEFAULT_QUICK_CITIES);
+      }
+    };
+    loadQuickCities();
+  }, []);
+
+  const isCityFavorite = (city: GeocodingResult) => {
+    return quickCities.some(
+      (c) => c.name.toLowerCase() === city.name.toLowerCase() &&
+             Math.abs(c.lat - city.lat) < 0.01 &&
+             Math.abs(c.lon - city.lon) < 0.01
+    );
+  };
+
+  const toggleFavoriteCity = async (city: GeocodingResult) => {
+    let updated: GeocodingResult[];
+    if (isCityFavorite(city)) {
+      updated = quickCities.filter(
+        (c) => !(c.name.toLowerCase() === city.name.toLowerCase() &&
+                 Math.abs(c.lat - city.lat) < 0.01 &&
+                 Math.abs(c.lon - city.lon) < 0.01)
+      );
+    } else {
+      updated = [...quickCities, city];
+    }
+    setQuickCities(updated);
+    try {
+      await AsyncStorage.setItem('quick_cities', JSON.stringify(updated));
+    } catch (e) {
+      console.error('Failed to save quick cities', e);
+    }
+  };
 
   // Load weather for selected city
   const fetchWeatherForCity = async (city: GeocodingResult) => {
@@ -281,9 +327,9 @@ export default function WeatherDashboard() {
           style={styles.quickCitiesContainer}
           contentContainerStyle={styles.quickCitiesContent}
         >
-          {QUICK_CITIES.map((city) => (
+          {quickCities.map((city) => (
             <TouchableOpacity
-              key={city.name}
+              key={`${city.name}-${city.lat}-${city.lon}`}
               style={[
                 styles.quickCityButton,
                 selectedCity.name === city.name && styles.quickCityButtonActive,
@@ -349,10 +395,23 @@ export default function WeatherDashboard() {
         <View style={styles.content}>
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.cityName}>
-              {selectedCity.name}
-              <Text style={styles.countryCode}> {selectedCity.country}</Text>
-            </Text>
+            <View style={styles.headerRow}>
+              <Text style={styles.cityName}>
+                {selectedCity.name}
+                <Text style={styles.countryCode}> {selectedCity.country}</Text>
+              </Text>
+              <TouchableOpacity
+                onPress={() => toggleFavoriteCity(selectedCity)}
+                style={styles.favoriteButton}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name={isCityFavorite(selectedCity) ? 'star' : 'star-outline'}
+                  size={24}
+                  color={isCityFavorite(selectedCity) ? '#fbbf24' : 'rgba(255, 255, 255, 0.5)'}
+                />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.dateText}>{getFormattedDate()}</Text>
             {weatherData.isMock && (
               <View style={styles.demoBanner}>
@@ -952,6 +1011,20 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 4,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  favoriteButton: {
+    padding: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   logoutButton: {
     padding: 8,
