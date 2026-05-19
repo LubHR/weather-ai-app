@@ -45,7 +45,11 @@ export async function getGeminiChatResponse(
 ${currentCityInfo}`;
 
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
+      systemInstruction: {
+        role: 'system',
+        parts: [{ text: systemInstruction }],
+      },
       generationConfig: {
         temperature: 0.7,
       },
@@ -67,7 +71,6 @@ ${currentCityInfo}`;
 
     const chat = model.startChat({
       history: chatHistory,
-      systemInstruction: systemInstruction,
     });
 
     const result = await chat.sendMessage(latestMessage);
