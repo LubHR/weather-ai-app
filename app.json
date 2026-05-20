@@ -12,7 +12,10 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Цей додаток використовує геолокацію для відображення поточної погоди у вашому місті."
+      }
     },
     "android": {
       "adaptiveIcon": {

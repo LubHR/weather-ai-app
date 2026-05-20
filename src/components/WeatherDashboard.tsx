@@ -10,6 +10,12 @@ import {
   Keyboard,
   Animated,
   Easing,
+  Dimensions,
+  PanResponder,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -17,6 +23,7 @@ import { searchCity, getWeatherData, getWeatherOverview } from '../services/weat
 import { GeocodingResult, OneCallResponse, WeatherOverviewResponse } from '../types/weather';
 import { auth } from '../services/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Location from 'expo-location';
 
 // Helper to map OpenWeather icon code to Ionicons name
 export function getWeatherIconName(iconCode: string): keyof typeof Ionicons.glyphMap {
@@ -140,6 +147,137 @@ const DEFAULT_QUICK_CITIES: GeocodingResult[] = [
   { name: 'Дніпро', lat: 48.4647, lon: 35.0462, country: 'UA', state: 'Дніпропетровська область' },
 ];
 
+interface DraggableCityRowProps {
+  city: GeocodingResult;
+  index: number;
+  isSelected: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+  onDragStart: () => void;
+  onDragEnd: (targetIndex: number) => void;
+  quickCitiesCount: number;
+  draggingIndex: number | null;
+}
+
+function DraggableCityRow({
+  city,
+  index,
+  isSelected,
+  onSelect,
+  onDelete,
+  onDragStart,
+  onDragEnd,
+  quickCitiesCount,
+  draggingIndex,
+}: DraggableCityRowProps) {
+  const pan = useRef(new Animated.ValueXY()).current;
+  const scale = useRef(new Animated.Value(1)).current;
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  // Use ref to keep latest props accessible inside PanResponder without rebuilding it
+  const propsRef = useRef({ index, quickCitiesCount, onDragStart, onDragEnd });
+  propsRef.current = { index, quickCitiesCount, onDragStart, onDragEnd };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onShouldBlockNativeResponder: () => true,
+      onPanResponderGrant: () => {
+        propsRef.current.onDragStart();
+        Animated.parallel([
+          Animated.timing(scale, {
+            toValue: 1.05,
+            duration: 150,
+            useNativeDriver: true,
+          }),
+          Animated.timing(opacity, {
+            toValue: 0.9,
+            duration: 150,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        pan.y.setValue(gestureState.dy);
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        const itemHeight = 76; // accurate item height including margin and padding
+        const indexDiff = Math.round(gestureState.dy / itemHeight);
+        const { index: currentIndex, quickCitiesCount: totalCount, onDragEnd: triggerDragEnd } = propsRef.current;
+        const targetIndex = Math.max(0, Math.min(totalCount - 1, currentIndex + indexDiff));
+
+        // Reset animated values instantly on release to ensure the list re-renders
+        // cleanly in the new order without any visual offsets or layout glitching.
+        pan.setValue({ x: 0, y: 0 });
+        scale.setValue(1);
+        opacity.setValue(1);
+
+        triggerDragEnd(targetIndex);
+      },
+      onPanResponderTerminate: () => {
+        pan.setValue({ x: 0, y: 0 });
+        scale.setValue(1);
+        opacity.setValue(1);
+        propsRef.current.onDragEnd(propsRef.current.index);
+      },
+    })
+  ).current;
+
+  return (
+    <Animated.View
+      style={[
+        styles.sheetCityRow,
+        isSelected && styles.sheetCityRowActive,
+        {
+          transform: [
+            { translateY: pan.y },
+            { scale: scale }
+          ],
+          opacity: opacity,
+          zIndex: draggingIndex === index ? 100 : 1,
+        }
+      ]}
+    >
+      <TouchableOpacity
+        style={styles.sheetCityInfo}
+        onPress={onSelect}
+        activeOpacity={0.7}
+      >
+        <Ionicons
+          name={isSelected ? "star" : "location-outline"}
+          size={18}
+          color={isSelected ? "#fbbf24" : "#94a3b8"}
+          style={styles.sheetCityIcon}
+        />
+        <View style={styles.sheetCityTextContainer}>
+          <Text style={[styles.sheetCityName, isSelected && styles.sheetCityNameActive]} numberOfLines={1}>
+            {city.name}
+          </Text>
+          <Text style={styles.sheetCityState} numberOfLines={1}>
+            {city.state ? `${city.state}, ` : ''}{city.country}
+          </Text>
+        </View>
+      </TouchableOpacity>
+
+      <View style={styles.sheetCityControls}>
+        <TouchableOpacity
+          style={[styles.controlButton, styles.deleteButton]}
+          onPress={onDelete}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="trash-outline" size={16} color="#ef4444" />
+        </TouchableOpacity>
+
+        <View {...panResponder.panHandlers} style={styles.dragHandle}>
+          <Ionicons name="menu-outline" size={20} color="#94a3b8" />
+        </View>
+      </View>
+    </Animated.View>
+  );
+}
+
 export default function WeatherDashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<GeocodingResult[]>([]);
@@ -156,6 +294,200 @@ export default function WeatherDashboard() {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quickCities, setQuickCities] = useState<GeocodingResult[]>([]);
+  const [isLocating, setIsLocating] = useState(false);
+
+  const [isSheetVisible, setIsSheetVisible] = useState(false);
+  const slideAnim = useRef(new Animated.Value(Dimensions.get('window').height)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  const openSheet = () => {
+    setIsSheetVisible(true);
+    Animated.parallel([
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 350,
+        easing: Easing.out(Easing.bezier(0.25, 0.46, 0.45, 0.94)),
+        useNativeDriver: true,
+      }),
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  };
+
+  const closeSheet = () => {
+    Animated.parallel([
+      Animated.timing(slideAnim, {
+        toValue: Dimensions.get('window').height,
+        duration: 300,
+        easing: Easing.in(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(fadeAnim, {
+        toValue: 0,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setIsSheetVisible(false);
+    });
+  };
+
+  const [sheetSearchQuery, setSheetSearchQuery] = useState('');
+  const [sheetSearchResults, setSheetSearchResults] = useState<GeocodingResult[]>([]);
+  const [sheetSearching, setSheetSearching] = useState(false);
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+
+  const handleSheetSearch = async (text: string) => {
+    setSheetSearchQuery(text);
+    if (text.trim().length < 2) {
+      setSheetSearchResults([]);
+      return;
+    }
+    setSheetSearching(true);
+    try {
+      const results = await searchCity(text);
+      setSheetSearchResults(results);
+    } catch (err) {
+      setSheetSearchResults([]);
+    } finally {
+      setSheetSearching(false);
+    }
+  };
+
+  const addCityToFavorites = async (city: GeocodingResult) => {
+    const exists = quickCities.some(
+      (c) => c.name.toLowerCase() === city.name.toLowerCase() &&
+        Math.abs(c.lat - city.lat) < 0.01 &&
+        Math.abs(c.lon - city.lon) < 0.01
+    );
+
+    if (exists) {
+      Alert.alert('Місто вже додано', `${city.name} вже є у вашому списку.`);
+      return;
+    }
+
+    if (quickCities.length >= 5) {
+      Alert.alert(
+        'Ліміт вичерпано',
+        'Ви можете додати максимум 5 міст до списку швидкого вибору. Будь ласка, видаліть якесь місто, щоб додати нове.'
+      );
+      return;
+    }
+
+    const updated = [...quickCities, city];
+    setQuickCities(updated);
+    try {
+      await AsyncStorage.setItem('quick_cities', JSON.stringify(updated));
+      selectCity(city);
+      setSheetSearchQuery('');
+      setSheetSearchResults([]);
+    } catch (e) {
+      console.error('Failed to add city to favorites', e);
+    }
+  };
+
+  const handleGetCurrentLocation = async () => {
+    setIsLocating(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Дозвіл відхилено',
+          'Будь ласка, дозвольте доступ до геолокації в налаштуваннях пристрою, щоб автоматично визначити ваше місцезнаходження.'
+        );
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = location.coords;
+      const reverseGeocode = await Location.reverseGeocodeAsync({
+        latitude,
+        longitude,
+      });
+
+      if (reverseGeocode && reverseGeocode.length > 0) {
+        const address = reverseGeocode[0];
+        const cityName = address.city || address.subregion || address.district || 'Моє місцезнаходження';
+        const detectedCity: GeocodingResult = {
+          name: cityName,
+          lat: latitude,
+          lon: longitude,
+          country: address.country || '',
+          state: address.region || undefined,
+        };
+        selectCity(detectedCity);
+      } else {
+        const detectedCity: GeocodingResult = {
+          name: 'Моє місцезнаходження',
+          lat: latitude,
+          lon: longitude,
+          country: '',
+        };
+        selectCity(detectedCity);
+      }
+    } catch (err: any) {
+      console.error('Failed to get location:', err);
+      Alert.alert(
+        'Помилка геолокації',
+        'Не вдалося отримати ваше поточне місцезнаходження. Будь ласка, переконайтеся, що GPS увімкнено.'
+      );
+    } finally {
+      setIsLocating(false);
+    }
+  };
+
+  const handleDragEnd = async (fromIndex: number, toIndex: number) => {
+    setDraggingIndex(null);
+    if (fromIndex === toIndex) return;
+    const updated = [...quickCities];
+    const [movedItem] = updated.splice(fromIndex, 1);
+    updated.splice(toIndex, 0, movedItem);
+    setQuickCities(updated);
+    try {
+      await AsyncStorage.setItem('quick_cities', JSON.stringify(updated));
+    } catch (e) {
+      console.error('Failed to save quick cities order', e);
+    }
+  };
+
+  const deleteCity = async (cityToDelete: GeocodingResult) => {
+    const updated = quickCities.filter(
+      (c) => !(c.name.toLowerCase() === cityToDelete.name.toLowerCase() &&
+        Math.abs(c.lat - cityToDelete.lat) < 0.01 &&
+        Math.abs(c.lon - cityToDelete.lon) < 0.01)
+    );
+    setQuickCities(updated);
+    try {
+      await AsyncStorage.setItem('quick_cities', JSON.stringify(updated));
+    } catch (e) {
+      console.error('Failed to save quick cities', e);
+    }
+
+    const isSelected = selectedCity.name.toLowerCase() === cityToDelete.name.toLowerCase() &&
+      Math.abs(selectedCity.lat - cityToDelete.lat) < 0.01 &&
+      Math.abs(selectedCity.lon - cityToDelete.lon) < 0.01;
+
+    if (isSelected) {
+      if (updated.length > 0) {
+        setSelectedCity(updated[0]);
+      } else {
+        const defaultKyiv = {
+          name: 'Київ',
+          lat: 50.4501,
+          lon: 30.5234,
+          country: 'UA',
+          state: 'м. Київ',
+        };
+        setSelectedCity(defaultKyiv);
+      }
+    }
+  };
 
   // Load quick cities on mount
   useEffect(() => {
@@ -163,12 +495,21 @@ export default function WeatherDashboard() {
       try {
         const saved = await AsyncStorage.getItem('quick_cities');
         if (saved) {
-          setQuickCities(JSON.parse(saved));
+          const parsed = JSON.parse(saved);
+          if (parsed.length > 5) {
+            const sliced = parsed.slice(0, 5);
+            setQuickCities(sliced);
+            await AsyncStorage.setItem('quick_cities', JSON.stringify(sliced));
+          } else {
+            setQuickCities(parsed);
+          }
         } else {
-          setQuickCities(DEFAULT_QUICK_CITIES);
+          const initial5 = DEFAULT_QUICK_CITIES.slice(0, 5);
+          setQuickCities(initial5);
+          await AsyncStorage.setItem('quick_cities', JSON.stringify(initial5));
         }
       } catch (e) {
-        setQuickCities(DEFAULT_QUICK_CITIES);
+        setQuickCities(DEFAULT_QUICK_CITIES.slice(0, 5));
       }
     };
     loadQuickCities();
@@ -177,8 +518,8 @@ export default function WeatherDashboard() {
   const isCityFavorite = (city: GeocodingResult) => {
     return quickCities.some(
       (c) => c.name.toLowerCase() === city.name.toLowerCase() &&
-             Math.abs(c.lat - city.lat) < 0.01 &&
-             Math.abs(c.lon - city.lon) < 0.01
+        Math.abs(c.lat - city.lat) < 0.01 &&
+        Math.abs(c.lon - city.lon) < 0.01
     );
   };
 
@@ -187,10 +528,17 @@ export default function WeatherDashboard() {
     if (isCityFavorite(city)) {
       updated = quickCities.filter(
         (c) => !(c.name.toLowerCase() === city.name.toLowerCase() &&
-                 Math.abs(c.lat - city.lat) < 0.01 &&
-                 Math.abs(c.lon - city.lon) < 0.01)
+          Math.abs(c.lat - city.lat) < 0.01 &&
+          Math.abs(c.lon - city.lon) < 0.01)
       );
     } else {
+      if (quickCities.length >= 5) {
+        Alert.alert(
+          'Ліміт вичерпано',
+          'Ви можете додати максимум 5 міст до списку швидкого вибору. Будь ласка, видаліть якесь місто, щоб додати нове.'
+        );
+        return;
+      }
       updated = [...quickCities, city];
     }
     setQuickCities(updated);
@@ -309,52 +657,78 @@ export default function WeatherDashboard() {
   };
 
   return (
-    <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
-      {/* Search Bar */}
-      <View style={styles.searchContainer}>
-        <View style={styles.searchBar}>
-          <Ionicons name="search" size={20} color="#94a3b8" style={styles.searchIcon} />
-          <TextInput
-            placeholder="Пошук міста (наприклад: Львів)..."
-            placeholderTextColor="#64748b"
-            value={searchQuery}
-            onChangeText={handleSearch}
-            style={styles.searchInput}
-          />
-          {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => handleSearch('')} style={styles.clearButton}>
-              <Ionicons name="close-circle" size={18} color="#94a3b8" />
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Quick Cities Selection */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.quickCitiesContainer}
-          contentContainerStyle={styles.quickCitiesContent}
-        >
-          {quickCities.map((city) => (
+    <View style={styles.mainWrapper}>
+      <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
+        {/* Search Bar */}
+        <View style={styles.searchContainer}>
+          <View style={styles.searchRow}>
+            <View style={[styles.searchBar, { flex: 1 }]}>
+              <Ionicons name="search" size={20} color="#94a3b8" style={styles.searchIcon} />
+              <TextInput
+                placeholder="Пошук міста (наприклад: Львів)..."
+                placeholderTextColor="#64748b"
+                value={searchQuery}
+                onChangeText={handleSearch}
+                style={styles.searchInput}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => handleSearch('')} style={styles.clearButton}>
+                  <Ionicons name="close-circle" size={18} color="#94a3b8" />
+                </TouchableOpacity>
+              )}
+            </View>
             <TouchableOpacity
-              key={`${city.name}-${city.lat}-${city.lon}`}
-              style={[
-                styles.quickCityButton,
-                selectedCity.name === city.name && styles.quickCityButtonActive,
-              ]}
-              onPress={() => selectCity(city)}
+              onPress={handleGetCurrentLocation}
+              style={styles.locationButton}
+              disabled={isLocating}
+              activeOpacity={0.7}
+              accessibilityLabel="Визначити місцезнаходження"
             >
-              <Text
-                style={[
-                  styles.quickCityText,
-                  selectedCity.name === city.name && styles.quickCityTextActive,
-                ]}
-              >
-                {city.name}
-              </Text>
+              {isLocating ? (
+                <ActivityIndicator size="small" color="#f8fafc" />
+              ) : (
+                <Ionicons name="location" size={20} color="#f8fafc" />
+              )}
             </TouchableOpacity>
-          ))}
-        </ScrollView>
+          </View>
+
+          {/* Quick Cities Selection */}
+          <View style={styles.quickCitiesRow}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.quickCitiesContainer}
+              contentContainerStyle={styles.quickCitiesContent}
+            >
+              {quickCities.map((city) => (
+                <TouchableOpacity
+                  key={`${city.name}-${city.lat}-${city.lon}`}
+                  style={[
+                    styles.quickCityButton,
+                    selectedCity.name === city.name && styles.quickCityButtonActive,
+                  ]}
+                  onPress={() => selectCity(city)}
+                >
+                  <Text
+                    style={[
+                      styles.quickCityText,
+                      selectedCity.name === city.name && styles.quickCityTextActive,
+                    ]}
+                  >
+                    {city.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.editQuickCitiesButton}
+              onPress={openSheet}
+              activeOpacity={0.7}
+              accessibilityLabel="Редагувати список міст"
+            >
+              <Ionicons name="create-outline" size={18} color="#a78bfa" />
+            </TouchableOpacity>
+          </View>
 
         {/* Search Results Dropdown */}
         {searchResults.length > 0 && (
@@ -617,7 +991,120 @@ export default function WeatherDashboard() {
       {/* Extra space at the bottom for scrolling */}
       <View style={{ height: 100 }} />
     </ScrollView>
-  );
+
+    {/* Bottom Sheet Modal */}
+    {isSheetVisible && (
+      <View style={StyleSheet.absoluteFill}>
+        {/* Backdrop */}
+        <Animated.View style={[styles.backdrop, { opacity: fadeAnim }]}>
+          <TouchableOpacity style={styles.backdropClickArea} onPress={closeSheet} activeOpacity={1} />
+        </Animated.View>
+
+        {/* Sheet container wrapping keyboard avoidance */}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.keyboardAvoidingSheet}
+        >
+          <Animated.View style={[styles.sheet, { transform: [{ translateY: slideAnim }] }]}>
+            <View style={styles.sheetHandle} />
+            
+            <View style={styles.sheetHeader}>
+              <View>
+                <Text style={styles.sheetTitle}>Обрані міста</Text>
+                <Text style={styles.sheetSubtitle}>Затисни та тягни для сортування (макс. 5 міст)</Text>
+              </View>
+              <TouchableOpacity style={styles.sheetCloseButton} onPress={closeSheet}>
+                <Ionicons name="close" size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Sheet Search Bar */}
+            <View style={styles.sheetSearchContainer}>
+              <View style={styles.sheetSearchBar}>
+                <Ionicons name="search" size={18} color="#94a3b8" style={styles.sheetSearchIcon} />
+                <TextInput
+                  placeholder="Додати місто в обране..."
+                  placeholderTextColor="#64748b"
+                  value={sheetSearchQuery}
+                  onChangeText={handleSheetSearch}
+                  style={styles.sheetSearchInput}
+                  autoCorrect={false}
+                />
+                {sheetSearchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => handleSheetSearch('')} style={styles.sheetClearButton}>
+                    <Ionicons name="close-circle" size={16} color="#94a3b8" />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {/* Sheet Search Results Dropdown */}
+              {sheetSearchResults.length > 0 && (
+                <View style={styles.sheetSearchResultsContainer}>
+                  {sheetSearchResults.map((city, index) => (
+                    <TouchableOpacity
+                      key={`${city.lat}-${city.lon}-${index}`}
+                      style={[
+                        styles.sheetSearchResultItem,
+                        index < sheetSearchResults.length - 1 && styles.sheetSearchResultItemBorder,
+                      ]}
+                      onPress={() => addCityToFavorites(city)}
+                    >
+                      <Ionicons name="location-outline" size={16} color="#8b5cf6" style={styles.sheetLocationIcon} />
+                      <Text style={styles.sheetSearchResultText} numberOfLines={1}>
+                        {city.name}
+                        {city.state ? `, ${city.state}` : ''} ({city.country})
+                      </Text>
+                      <Ionicons name="add-circle-outline" size={20} color="#a78bfa" style={styles.sheetAddIcon} />
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </View>
+
+            {quickCities.length === 0 ? (
+              <View style={styles.emptySheetContainer}>
+                <Ionicons name="location-outline" size={48} color="#64748b" />
+                <Text style={styles.emptySheetText}>Немає вибраних міст</Text>
+                <Text style={styles.emptySheetSubtext}>Шукай та додавай міста за допомогою пошуку вище</Text>
+              </View>
+            ) : (
+              <ScrollView
+                style={styles.sheetScroll}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                scrollEnabled={draggingIndex === null}
+              >
+                {quickCities.map((city, index) => {
+                  const isSelected = selectedCity.name.toLowerCase() === city.name.toLowerCase() &&
+                    Math.abs(selectedCity.lat - city.lat) < 0.01 &&
+                    Math.abs(selectedCity.lon - city.lon) < 0.01;
+
+                  return (
+                    <DraggableCityRow
+                      key={`${city.name}-${city.lat}-${city.lon}`}
+                      city={city}
+                      index={index}
+                      isSelected={isSelected}
+                      onSelect={() => {
+                        selectCity(city);
+                        closeSheet();
+                      }}
+                      onDelete={() => deleteCity(city)}
+                      onDragStart={() => setDraggingIndex(index)}
+                      onDragEnd={(targetIndex) => handleDragEnd(index, targetIndex)}
+                      quickCitiesCount={quickCities.length}
+                      draggingIndex={draggingIndex}
+                    />
+                  );
+                })}
+              </ScrollView>
+            )}
+          </Animated.View>
+        </KeyboardAvoidingView>
+      </View>
+    )}
+  </View>
+);
 }
 
 const styles = StyleSheet.create({
@@ -629,6 +1116,21 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 8,
     zIndex: 10,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  locationButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 14,
+    height: 48,
+    width: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
   },
   searchBar: {
     flexDirection: 'row',
@@ -751,6 +1253,8 @@ const styles = StyleSheet.create({
     marginVertical: 16,
   },
   cityName: {
+    flex: 1,
+    marginRight: 12,
     color: '#f8fafc',
     fontSize: 32,
     fontWeight: '700',
@@ -948,8 +1452,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   quickCitiesContainer: {
-    marginTop: 12,
-    flexDirection: 'row',
+    flex: 1,
   },
   quickCitiesContent: {
     paddingRight: 10,
@@ -1040,5 +1543,247 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  mainWrapper: {
+    flex: 1,
+  },
+  quickCitiesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  editQuickCitiesButton: {
+    padding: 8,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 38,
+    width: 38,
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+  },
+  backdropClickArea: {
+    flex: 1,
+  },
+  sheet: {
+    flex: 1,
+    backgroundColor: '#0f172a',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    paddingTop: 12,
+    paddingHorizontal: 20,
+    paddingBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -10 },
+    shadowOpacity: 0.35,
+    shadowRadius: 15,
+    elevation: 20,
+  },
+  sheetHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  sheetTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  sheetSubtitle: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  sheetCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  sheetScroll: {
+    flex: 1,
+  },
+  sheetCityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  sheetCityRowActive: {
+    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+    borderColor: 'rgba(139, 92, 246, 0.25)',
+  },
+  sheetCityInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingVertical: 4,
+  },
+  sheetCityIcon: {
+    marginRight: 12,
+  },
+  sheetCityName: {
+    color: '#cbd5e1',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  sheetCityNameActive: {
+    color: '#ffffff',
+  },
+  sheetCityState: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  sheetCityControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  controlButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  controlButtonDisabled: {
+    opacity: 0.4,
+  },
+  deleteButton: {
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+    borderColor: 'rgba(239, 68, 68, 0.15)',
+  },
+  emptySheetContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  emptySheetText: {
+    color: '#94a3b8',
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 12,
+  },
+  emptySheetSubtext: {
+    color: '#64748b',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 6,
+    paddingHorizontal: 20,
+    lineHeight: 18,
+  },
+  dragHandle: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  keyboardAvoidingSheet: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: '60%',
+  },
+  sheetSearchContainer: {
+    marginBottom: 14,
+    zIndex: 20,
+  },
+  sheetSearchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    height: 40,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  sheetSearchIcon: {
+    marginRight: 6,
+  },
+  sheetSearchInput: {
+    flex: 1,
+    color: '#ffffff',
+    fontSize: 14,
+    padding: 0,
+  },
+  sheetClearButton: {
+    padding: 4,
+  },
+  sheetSearchResultsContainer: {
+    position: 'absolute',
+    top: 44,
+    left: 0,
+    right: 0,
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+    maxHeight: 180,
+    overflow: 'scroll',
+    zIndex: 999,
+  },
+  sheetSearchResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  sheetSearchResultItemBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  sheetLocationIcon: {
+    marginRight: 8,
+  },
+  sheetSearchResultText: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    flex: 1,
+  },
+  sheetAddIcon: {
+    marginLeft: 8,
+  },
+  sheetCityTextContainer: {
+    flex: 1,
+    paddingRight: 8,
   },
 });
