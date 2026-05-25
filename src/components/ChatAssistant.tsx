@@ -24,7 +24,7 @@ export default function ChatAssistant() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome',
-      text: 'Привіт! Я твій розумний погодний асистент. 🤖\n\nЗапитай мене будь-що про погоду в конкретному місті або порадься щодо планів чи одягу. Наприклад: "Яка погода у Києві і чи потрібна парасолька?"',
+      text: 'Привіт! Я твій розумний погодний асистент.\n\nЗапитай мене будь-що про погоду в конкретному місті або порадься щодо планів чи одягу. Наприклад: "Яка погода у Києві і чи потрібна парасолька?"',
       sender: 'ai',
       timestamp: new Date(),
     },
@@ -99,7 +99,7 @@ export default function ChatAssistant() {
             // Update UI to let user know we are fetching weather details
             const fetchingStatusMessage: ChatMessage = {
               id: (Date.now() + 1).toString(),
-              text: `🤖 Шукаю актуальну погоду для міста ${targetCity}...`,
+              text: `Шукаю актуальну погоду для міста ${targetCity}...`,
               sender: 'ai',
               timestamp: new Date(),
             };
@@ -208,7 +208,7 @@ export default function ChatAssistant() {
     setMessages([
       {
         id: Date.now().toString(),
-        text: 'Діалог оновлено! Я готовий до нових запитань про погоду. 🤖',
+        text: 'Діалог оновлено! Я готовий до нових запитань про погоду.',
         sender: 'ai',
         timestamp: new Date(),
       },
@@ -293,8 +293,10 @@ export default function ChatAssistant() {
           value={inputText}
           onChangeText={setInputText}
           style={styles.input}
-          multiline
           maxLength={200}
+          returnKeyType="send"
+          onSubmitEditing={handleSend}
+          blurOnSubmit={true}
         />
         <TouchableOpacity
           onPress={handleSend}
